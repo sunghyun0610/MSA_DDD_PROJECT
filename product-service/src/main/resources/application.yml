@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: product-service
+  config:
+    # 기동 시 config-service에서 중앙 설정을 받아온다.
+    # optional: → config-service가 꺼져 있어도 로컬 설정만으로 기동 가능 (예제 편의)
+    import: "optional:configserver:http://localhost:8888"
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka

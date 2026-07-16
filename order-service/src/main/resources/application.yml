@@ -1,0 +1,21 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+  config:
+    # 기동 시 config-service에서 중앙 설정을 받아온다.
+    # optional: → config-service가 꺼져 있어도 로컬 설정만으로 기동 가능 (예제 편의)
+    import: "optional:configserver:http://localhost:8888"
+
+# 로컬 기본값. config-service가 켜져 있으면 config-repo/order-service.yml 값이 우선한다.
+services:
+  product:
+    # Eureka 서비스 이름. @LoadBalanced RestClient가 실제 인스턴스 주소로 변환한다.
+    base-url: http://product-service
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka

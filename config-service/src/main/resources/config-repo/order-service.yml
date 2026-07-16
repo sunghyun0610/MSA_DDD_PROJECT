@@ -1,0 +1,13 @@
+# order-service의 중앙 관리 설정.
+# 여기 값이 서비스 로컬 application.yml보다 우선 적용된다.
+# 실무에서는 이 파일이 Git 저장소에서 관리되며, 환경별로
+# order-service-dev.yml / order-service-prod.yml 처럼 분리한다.
+
+services:
+  product:
+    # Eureka에 등록된 서비스 이름. 클라이언트 사이드 로드밸런싱으로 실제 주소를 찾는다.
+    base-url: http://product-service
+
+order:
+  sample:
+    message: "이 값은 config-service에서 내려온 설정입니다"

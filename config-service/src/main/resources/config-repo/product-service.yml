@@ -1,0 +1,5 @@
+# product-service의 중앙 관리 설정.
+
+product:
+  sample:
+    message: "이 값은 config-service에서 내려온 설정입니다"
