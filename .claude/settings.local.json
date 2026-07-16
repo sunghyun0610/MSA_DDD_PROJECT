@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\('C:\\\\Users\\\\moon\\\\Desktop\\\\MSA\\\\README.md'\\); Write-Output \\(\"first bytes: \" + \\(\\($bytes[0..5] | ForEach-Object { $_.ToString\\('X2'\\) }\\) -join ' '\\)\\); Write-Output \\(\"length: \" + $bytes.Length\\))"
+    ]
+  }
+}
