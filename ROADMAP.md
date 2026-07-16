@@ -1,0 +1,215 @@
+# MSA + DDD 프로젝트 개발 로드맵
+
+이 문서는 **지금까지 구현된 내용**과 **앞으로 확장할 내용**을 정리한 계획 문서입니다.
+현재는 아키텍처 골격만 갖춘 상태이며, 여기에 영속성·동시성·화면·배포 파이프라인을 얹어
+실전에 가까운 형태로 발전시키는 것이 목표입니다.
+
+---
+
+## 1. 지금까지 구현된 내용 (현재 상태: 아키텍처 골격)
+
+### 1.1 서비스 구성
+
+| 서비스 | 포트 | 역할 | 종류 |
+|---|---|---|---|
+| discovery-service | 8761 | 서비스 디스커버리 (Eureka). 서비스 위치 레지스트리 | 인프라 |
+| config-service | 8888 | 중앙 설정 서버 (Spring Cloud Config) | 인프라 |
+| api-gateway | 8000 | 단일 진입점 (Spring Cloud Gateway). 경로 기반 라우팅 | 인프라 |
+| **order-service** | 8080 | 주문 도메인. 주문 생성/조회, 재고 차감 오케스트레이션 | **비즈니스** |
+| **product-service** | 8081 | 상품 도메인. 상품 조회, 재고 관리 | **비즈니스** |
+
+### 1.2 구현된 아키텍처 특징
+
+- **MSA 구조**: 두 비즈니스 서비스를 바운디드 컨텍스트로 분리. 서로의 DB/코드를 공유하지 않고 REST API로만 통신
+- **서비스 디스커버리**: `http://product-service` 같은 서비스 이름으로 호출 (주소 하드코딩 없음)
+- **DDD 레이어드 구조**: 각 서비스 내부를 `interfaces → application → domain ← infrastructure` 4계층으로 구성
+- **도메인 규칙의 캡슐화**: 재고 차감 규칙은 `Product` 애그리거트에, 주문 생성 규칙은 `Order` 애그리거트에 위치
+- **포트 & 어댑터**: 리포지토리, 외부 서비스 호출, 이벤트 발행을 모두 인터페이스(포트)로 추상화
+- **도메인 이벤트**: 주문 완료 시 `OrderPlacedEvent` 발행 → 핸들러가 후속 처리 (현재는 서비스 내부 이벤트)
+
+### 1.3 현재 전제와 한계 (← 확장의 출발점)
+
+아래 항목들이 앞으로 확장하면서 하나씩 걷어낼 "임시 구현"입니다.
+
+| 영역 | 현재 상태 | 한계 |
+|---|---|---|
+| 영속성 | 인메모리 `ConcurrentHashMap` | 재시작하면 데이터 소멸, 조회/검색 기능 빈약 |
+| 동시성 | 제어 없음 | 재고 차감 시 동시 요청이 몰리면 오버셀 가능 |
+| 통신 | 동기 REST 호출 | product-service 장애 시 order-service도 영향 |
+| 조회 | 단건 조회만 | 상품 목록/페이징/검색 없음 |
+| 트래픽 | 대비 없음 | 선착순·대량 유입 시 서비스 과부하 |
+| 화면 | 없음 (curl 테스트) | 사용자 UI 부재 |
+| 배포 | 로컬 `gradle bootRun` | 컨테이너화·자동 배포 없음 |
+| 인증 | 없음 | 누구나 API 호출 가능 |
+
+---
+
+## 2. 앞으로 확장할 내용
+
+각 항목은 **목표 / 현재 대비 변화 / 건드리는 위치 / 핵심 고려사항 / 추천 기술** 순으로 정리했습니다.
+
+### 2.1 DB 연동 (영속성)
+
+- **목표**: 인메모리 저장소를 실제 DB로 교체. 데이터 영속화
+- **현재 대비 변화**: `InMemoryProductRepository` / `InMemoryOrderRepository` → JPA 구현체로 교체
+- **건드리는 위치**: 각 서비스의 `infrastructure/persistence` (도메인/응용 계층은 그대로 — 포트 덕분)
+- **핵심 고려사항**:
+  - **Database per Service**: 서비스마다 독립 DB (order-db, product-db). 서로의 테이블을 직접 조회 금지 → MSA 원칙
+  - **도메인 모델 vs JPA 엔티티**: 순수 도메인 객체(`Order`, `Product`)와 JPA 엔티티를 분리할지, 합칠지 결정. 분리하면 도메인이 깨끗하지만 매핑 코드 증가
+  - **애그리거트 매핑**: `Order`-`OrderLine`은 `@OneToMany`, `Money`는 `@Embeddable`로 매핑
+  - **스키마 관리**: Flyway 또는 Liquibase로 버전 관리
+- **추천 기술**: Spring Data JPA, PostgreSQL 또는 MySQL (개발 초기엔 H2), Flyway
+- **의존성**: 다른 대부분의 확장이 이 위에 올라감 → **가장 먼저 추천**
+
+### 2.2 상품 페이징 처리
+
+- **목표**: 상품 목록 조회 API에 페이징/정렬/검색 추가
+- **현재 대비 변화**: `GET /products/{id}` 단건 조회 → `GET /products?page=0&size=20&sort=...` 목록 조회 추가
+- **건드리는 위치**: product-service의 `interfaces` (컨트롤러), `application` (조회 유스케이스), `domain/repository` (포트에 목록 조회 시그니처 추가), `infrastructure` (구현)
+- **핵심 고려사항**:
+  - Spring Data의 `Pageable` / `Page<T>` 활용
+  - 조회 전용 응답 DTO를 별도로 두기 (애그리거트를 그대로 노출하지 않음)
+  - 조회가 복잡해지면 CQRS(명령/조회 모델 분리) 도입 고려
+- **추천 기술**: Spring Data JPA `Pageable`, QueryDSL(동적 검색 조건이 많아질 때)
+- **의존성**: DB 연동(2.1) 이후
+
+### 2.3 동시성 제어 (재고 차감)
+
+- **목표**: 여러 주문이 동시에 같은 상품을 살 때 재고가 음수가 되지 않도록 보장
+- **현재 대비 변화**: 아무 제어 없는 `stockQuantity -= quantity` → 원자적/락 기반 차감
+- **건드리는 위치**: product-service의 `domain`(불변식 `stock >= 0`은 그대로 유지) + `infrastructure`(차감 방식 구현)
+- **핵심 고려사항** — 전략 비교:
+  - **비관적 락 (Pessimistic Lock)**: `SELECT ... FOR UPDATE`. 확실하지만 처리량 저하
+  - **낙관적 락 (Optimistic Lock)**: `@Version` 컬럼. 충돌 시 재시도. 경합이 적을 때 유리
+  - **원자적 UPDATE**: `UPDATE product SET stock = stock - :qty WHERE id = :id AND stock >= :qty` → 영향 행이 0이면 재고 부족. 단순하고 빠름
+  - **분산 락 (Redis)**: 여러 인스턴스/서비스에 걸친 락이 필요할 때 (Redisson 등)
+  - **DDD 관점**: "재고는 0 이상"이라는 불변식은 도메인의 책임, "어떻게 락을 거느냐"는 인프라의 책임으로 분리
+- **추천 기술**: 우선 원자적 UPDATE 또는 `@Version`으로 시작 → 트래픽 커지면 Redis 분산 락
+- **의존성**: DB 연동(2.1) 이후
+
+### 2.4 대기열 구축 (선착순 / 트래픽 완충)
+
+- **목표**: 한정 수량 이벤트나 대량 유입 시 요청을 줄 세워 순차 처리, 시스템 보호
+- **현재 대비 변화**: 요청이 곧바로 재고 차감까지 직행 → 대기열을 거쳐 순차/비동기 처리
+- **건드리는 위치**: order-service 진입부 + 신규 인프라(Redis/Kafka)
+- **핵심 고려사항**:
+  - **대기열 방식**:
+    - Redis Sorted Set 기반 대기 순번 발급(대기표) → 순서대로 입장 허용
+    - Kafka로 주문 요청을 이벤트로 흘려보내 컨슈머가 순차 소비 (트래픽 평탄화)
+  - **동기 → 비동기 전환**: "주문 접수됨"을 먼저 응답하고, 실제 처리 결과는 이후 통지(폴링/웹소켓/알림)
+  - 이 지점에서 **이벤트 기반 아키텍처 + Saga**(재고 차감 실패 시 주문 보상)로 자연스럽게 확장됨
+- **추천 기술**: Redis (대기표/순번), Kafka 또는 RabbitMQ (비동기 처리)
+- **의존성**: DB(2.1), 동시성 제어(2.3) 이후가 자연스러움
+
+### 2.5 프론트엔드 화면
+
+- **목표**: 상품 목록·상세, 주문하기, 주문 내역 화면 구현
+- **현재 대비 변화**: curl 테스트 → 실제 웹 UI
+- **건드리는 위치**: 신규 프론트엔드 프로젝트 + api-gateway(CORS/라우팅)
+- **핵심 고려사항**:
+  - 모든 API 호출은 **api-gateway(:8000) 단일 진입점**으로 (개별 서비스 포트 직접 호출 금지)
+  - CORS는 게이트웨이에서 일괄 처리
+  - 화면이 여러 서비스 데이터를 조합해야 하면 **BFF(Backend For Frontend)** 패턴 고려
+  - 페이징(2.2) API와 맞물림
+- **추천 기술**: React 또는 Vue + Vite, TanStack Query(서버 상태 관리)
+- **의존성**: 페이징(2.2) 등 조회 API가 갖춰지면 수월. 병행 개발 가능
+
+### 2.6 Docker 컨테이너화
+
+- **목표**: 각 서비스를 컨테이너로 패키징, 로컬에서 전체 스택을 한 번에 기동
+- **현재 대비 변화**: 서비스마다 수동 `gradle bootRun` → `docker compose up` 한 방
+- **건드리는 위치**: 각 서비스에 `Dockerfile` + 루트에 `docker-compose.yml`
+- **핵심 고려사항**:
+  - 서비스별 `Dockerfile` (멀티 스테이지 빌드로 이미지 경량화)
+  - `docker-compose.yml`에 5개 서비스 + DB + Redis/Kafka를 함께 정의
+  - **기동 순서/의존성**: `depends_on` + 헬스체크 (discovery → config → 비즈니스 → gateway)
+  - 컨테이너 환경에 맞게 서비스 주소를 `localhost` → 서비스 이름으로 (설정 프로파일 분리: local / docker)
+- **추천 기술**: Docker, Docker Compose (이후 규모 커지면 Kubernetes)
+- **의존성**: 배포할 서비스들이 어느 정도 완성된 뒤
+
+### 2.7 CI/CD 파이프라인
+
+- **목표**: 커밋 → 자동 빌드/테스트 → 이미지 생성/푸시 → 배포 자동화
+- **현재 대비 변화**: 수동 빌드/실행 → 자동화된 파이프라인
+- **건드리는 위치**: 저장소 루트 `.github/workflows/` (또는 GitLab CI, Jenkins)
+- **핵심 고려사항**:
+  - 단계: `체크아웃 → 빌드 → 테스트 → Docker 이미지 빌드 → 레지스트리 푸시 → 배포`
+  - **서비스별 파이프라인**: 변경된 서비스만 빌드/배포 (모노레포라면 경로 필터링)
+  - 이미지 태깅 전략 (커밋 SHA / 버전)
+  - 시크릿 관리 (레지스트리 인증, DB 비밀번호 등)
+- **추천 기술**: GitHub Actions (시작하기 쉬움), Docker Registry (Docker Hub/GHCR)
+- **의존성**: Docker화(2.6) 이후
+
+---
+
+## 3. 추천 구현 순서
+
+의존 관계를 고려한 순서입니다. 학습 효과와 "다음 단계의 토대가 되는가"를 기준으로 배치했습니다.
+
+```
+1. DB 연동 (2.1)          ← 거의 모든 확장의 토대. 가장 먼저
+       │
+2. 상품 페이징 (2.2)       ← DB 위에서 조회 기능 확장. 난이도 낮아 워밍업으로 좋음
+       │
+3. 동시성 제어 (2.3)       ← 재고 차감 경합 해결. MSA/동시성 학습의 핵심
+       │
+4. Docker 컨테이너화 (2.6)  ← 여러 서비스를 한 번에 띄워 테스트 편의성 확보
+       │
+5. 대기열 구축 (2.4)       ← 이벤트 기반/Saga로 확장되는 심화 주제
+       │
+6. CI/CD (2.7)            ← 자동화. Docker화 이후
+       │
+* 프론트엔드 (2.5)         ← 조회 API가 생긴 뒤 언제든 병행 개발 가능
+```
+
+> 참고: 프론트엔드는 특정 단계에 묶이지 않고, 페이징(2.2) 정도만 되면 병행해서 만들 수 있습니다.
+> Docker화(2.6)는 서비스가 3개 이상 되면 수동 기동이 번거로워지므로 더 앞당겨도 좋습니다.
+
+---
+
+## 4. 확장 후 목표 아키텍처
+
+```mermaid
+graph TB
+    FE[프론트엔드<br/>React/Vue]
+    GW[api-gateway :8000]
+
+    subgraph 인프라 서비스
+        EUREKA[discovery-service]
+        CONFIG[config-service]
+    end
+
+    subgraph 비즈니스 서비스
+        ORDER[order-service]
+        PRODUCT[product-service]
+    end
+
+    subgraph 데이터 & 메시징
+        ODB[(order-db)]
+        PDB[(product-db)]
+        REDIS[(Redis<br/>대기열/분산락)]
+        MQ[Kafka<br/>비동기 이벤트]
+    end
+
+    FE -->|REST| GW
+    GW --> ORDER
+    GW --> PRODUCT
+    ORDER -->|REST| PRODUCT
+    ORDER --> ODB
+    PRODUCT --> PDB
+    ORDER -.대기열/락.-> REDIS
+    ORDER -.이벤트 발행.-> MQ
+    PRODUCT -.이벤트 구독.-> MQ
+    ORDER -.등록/조회.-> EUREKA
+    PRODUCT -.등록/조회.-> EUREKA
+```
+
+전체를 Docker Compose로 묶어 `docker compose up` 한 번에 기동하고,
+GitHub Actions로 빌드→테스트→이미지 푸시→배포를 자동화하는 것이 최종 그림입니다.
+
+---
+
+## 5. 참고 도서
+
+- 최범균, 《도메인 주도 개발 시작하기》 — DDD 전술 패턴(애그리거트, 리포지토리 등) 입문
+- 크리스 리처드슨, 《마이크로서비스 패턴》 — Saga, CQRS, 이벤트 소싱, API 조합 등 MSA 패턴 총정리
